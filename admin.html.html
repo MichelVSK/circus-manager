@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Admin - Circus Poker</title>
+<style>
+  body{font-family:Arial;background:#f4f6f8;margin:20px}
+  .box{max-width:1100px;margin:auto;background:#fff;padding:18px;border-radius:8px}
+  input,select,button{padding:8px;margin:6px 0;width:100%}
+  table{width:100%;border-collapse:collapse}
+  th,td{border:1px solid #ddd;padding:8px;text-align:left}
+  .row{display:flex;gap:8px}
+  .row> *{flex:1}
+  img.ev{max-width:120px;display:block}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>Admin — Circus Poker</h1>
+
+  <section id="login-sec">
+    <h2>Connexion Admin</h2>
+    <form id="login-admin">
+      <input name="email" placeholder="Email admin" required>
+      <input name="password" type="password" placeholder="Mot de passe" required>
+      <button>Se connecter</button>
+    </form>
+    <p id="login-admin-msg"></p>
+  </section>
+
+  <section id="dash" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2>Dashboard</h2>
+      <div><button id="logout">Se déconnecter</button></div>
+    </div>
+
+    <h3>Créer événement (image ≤2MB: JPG/PNG/WEBP)</h3>
+    <form id="create-event">
+      <input name="nom" placeholder="Nom événement" required>
+      <div class="row"><input name="debut" type="date" required><input name="fin" type="date" required></div>
+      <input id="evt-file" type="file" accept="image/jpeg,image/png,image/webp">
+      <button type="submit">Créer événement</button>
+    </form>
+    <p id="evt-msg"></p>
+
+    <h3>Événements</h3>
+    <div id="events-list"></div>
+
+    <h3>Liste des croupiers</h3>
+    <table><thead><tr><th>Nom</th><th>Prénom</th><th>Email</th><th>LiveGame</th><th>Priorité</th><th>Action</th></tr></thead>
+    <tbody id="croups-tbody"></tbody></table>
+
+  </section>
+</div>
+
+<script type="module">
+import { firebaseConfig } from './firebase-config.js';
+import { auth, db, uploadEventImage, exportEventCSV } from './app.js';
+import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, updateDoc } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
+import { getStorage, ref as sref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-storage.js";
+
+initializeApp(firebaseConfig);
+const myAuth = getAuth();
+const myDb = getFirestore();
+const myStorage = getStorage();
+
+const loginForm = document.getElementById('login-admin');
+const loginMsg = document.getElementById('login-admin-msg');
+const loginSec = document.getElementById('login-sec');
+const dash = document.getElementById('dash');
+
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  loginMsg.textContent = 'Connexion...';
+  try {
+    await signInWithEmailAndPassword(myAuth, loginForm.email.value, loginForm.password.value);
+    loginMsg.textContent = 'Connecté';
+    loginForm.reset();
+  } catch (err) {
+    console.error(err);
+    loginMsg.textContent = 'Erreur connexion';
+  }
+});
+
+onAuthStateChanged(myAuth, user => {
+  if (user) {
+    loginSec.style.display = 'none';
+    dash.style.display = 'block';
+    loadDashboard();
+  } else {
+    loginSec.style.display = 'block';
+    dash.style.display = 'none';
+  }
+});
+
+document.getElementById('logout').addEventListener('click', async ()=> await signOut(myAuth) );
+
+async function loadDashboard() {
+  await loadCroupiers();
+  await loadEvents();
+}
+
+async function loadCroupiers() {
+  const tbody = document.getElementById('croups-tbody');
+  tbody.innerHTML = '';
+  const snap = await getDocs(collection(myDb,'croupiers'));
+  if (snap.empty) { tbody.innerHTML = '<tr><td colspan="6">Aucun croupier</td></tr>'; return; }
+  snap.forEach(d => {
+    const r = d.data();
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.nom}</td><td>${r.prenom}</td><td>${r.email}</td><td>${r.livegame?'Oui':''}</td>
+      <td><select data-id="${d.id}" class="prio"><option value="1" ${r.priorite==1?'selected':''}>1</option><option value="2" ${r.priorite==2?'selected':''}>2</option><option value="3" ${(!r.priorite||r.priorite==3)?'selected':''}>3</option></select></td>
+      <td><button data-id="${d.id}" class="delc">Supprimer</button></td>`;
+    tbody.appendChild(tr);
+  });
+
+  document.querySelectorAll('.delc').forEach(b => b.addEventListener('click', async e => {
+    if (confirm('Supprimer ce croupier ?')) {
+      await deleteDoc(doc(myDb,'croupiers', e.target.dataset.id));
+      loadCroupiers();
+    }
+  }));
+
+  document.querySelectorAll('.prio').forEach(s => s.addEventListener('change', async e => {
+    await updateDoc(doc(myDb,'croupiers', e.target.dataset.id), { priorite: parseInt(e.target.value) });
+    alert('Priorité mise à jour');
+  }));
+}
+
+async function loadEvents() {
+  const container = document.getElementById('events-list');
+  container.innerHTML = '';
+  const snap = await getDocs(collection(myDb,'evenements'));
+  if (snap.empty) { container.textContent = 'Aucun événement'; return; }
+  for (const d of snap.docs) {
+    const e = d.data();
+    const card = document.createElement('div');
+    card.style.border='1px solid #eee'; card.style.padding='8px'; card.style.margin='8px 0';
+    let html = `<strong>${e.nom}</strong> — ${e.debut} → ${e.fin}<div style="margin-top:8px">`;
+    html += `<button data-id="${d.id}" class="exportBtn">Exporter CSV</button> <button data-id="${d.id}" class="delEvt">Supprimer</button></div>`;
+    card.innerHTML = html;
+    if (e.imageUrl) {
+      const img = document.createElement('img'); img.src = e.imageUrl; img.className='ev'; card.appendChild(img);
+    }
+    card.innerHTML += `<div id="avail-${d.id}" style="margin-top:8px"></div>`;
+    container.appendChild(card);
+    loadPostulationsForEvent(d.id);
+  }
+
+  document.querySelectorAll('.delEvt').forEach(b => b.addEventListener('click', async e => {
+    if (confirm('Supprimer événement ?')) {
+      await deleteDoc(doc(myDb,'evenements', e.target.dataset.id));
+      loadEvents();
+    }
+  }));
+
+  document.querySelectorAll('.exportBtn').forEach(b => b.addEventListener('click', async e => {
+    await exportEventCSV(e.target.dataset.id);
+  }));
+}
+
+async function loadPostulationsForEvent(eventId) {
+  const cont = document.getElementById(`avail-${eventId}`);
+  cont.innerHTML = 'Chargement...';
+  const psnap = await getDocs(collection(myDb,'postulations'));
+  const posts = psnap.docs.filter(p => p.data().eventId === eventId);
+  if (posts.length === 0) { cont.innerHTML = '<em>Aucune postulation</em>'; return; }
+  const cSnap = await getDocs(collection(myDb,'croupiers'));
+  cont.innerHTML = '';
+  for (const p of posts) {
+    const d = p.data();
+    const cdoc = cSnap.docs.find(cd => cd.data().email.toLowerCase() === d.email.toLowerCase());
+    const name = cdoc ? `${cdoc.data().prenom || ''} ${cdoc.data().nom || ''}`.trim() : d.email;
+    const prio = cdoc ? (cdoc.data().priorite || '—') : '—';
+    const div = document.createElement('div');
+    div.innerHTML = `<strong>${name}</strong> — ${d.debut} → ${d.fin} (prio ${prio}) <button data-id="${p.id}" class="delPost">Supprimer</button>`;
+    cont.appendChild(div);
+  }
+  cont.querySelectorAll('.delPost').forEach(b => b.addEventListener('click', async e => {
+    if (confirm('Supprimer postulation ?')) {
+      await deleteDoc(doc(myDb,'postulations', e.target.dataset.id));
+      loadPostulationsForEvent(eventId);
+    }
+  }));
+}
+
+// create event with optional image (uses uploadEventImage from app.js)
+document.getElementById('create-event').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const nom = ev.target.nom.value.trim();
+  const debut = ev.target.debut.value;
+  const fin = ev.target.fin.value;
+  const file = document.getElementById('evt-file').files[0];
+  let url = null;
+  if (file) {
+    try {
+      url = await uploadEventImage(file);
+    } catch (err) {
+      document.getElementById('evt-msg').textContent = 'Erreur upload image: ' + (err.message || '');
+      return;
+    }
+  }
+  await addDoc(collection(myDb,'evenements'), { nom, debut, fin, imageUrl: url || null, createdAt: new Date() });
+  document.getElementById('evt-msg').textContent = 'Événement créé';
+  loadEvents();
+});
+</script>
+</div>
+</body>
+</html>

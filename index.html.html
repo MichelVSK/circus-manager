@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Croupier - Circus Poker</title>
+<style>
+  body{font-family:Arial;background:#f6f8fa;margin:20px}
+  .box{max-width:900px;margin:auto;background:#fff;padding:18px;border-radius:8px}
+  input,select,button{padding:8px;margin:6px 0;width:100%}
+  .row{display:flex;gap:8px}
+  .row input{flex:1}
+</style>
+</head>
+<body>
+<div class="box">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h1 id="header">Inscription / Espace Croupier</h1>
+    <div>Langue: 
+      <select id="lang">
+        <option value="fr">FR</option><option value="en">EN</option><option value="it">IT</option><option value="es">ES</option>
+      </select>
+    </div>
+  </div>
+
+  <h2>Créer un compte (email + mot de passe)</h2>
+  <form id="signup">
+    <input name="nom" placeholder="Nom" required>
+    <input name="prenom" placeholder="Prénom" required>
+    <input name="email" type="email" placeholder="Email" required>
+    <input name="password" type="password" placeholder="Mot de passe (>=6)" required>
+    <label><input name="livegame" type="checkbox"> Formé LiveGame</label>
+    <button type="submit">S'inscrire et recevoir un email de vérification</button>
+  </form>
+  <p id="signup-msg"></p>
+
+  <hr>
+
+  <h2>Se connecter</h2>
+  <form id="login">
+    <input name="email" type="email" placeholder="Email" required>
+    <input name="password" type="password" placeholder="Mot de passe" required>
+    <button type="submit">Se connecter</button>
+  </form>
+  <p id="login-msg"></p>
+
+  <hr>
+
+  <h2>Événements disponibles</h2>
+  <div id="events"></div>
+
+  <hr>
+
+  <h2>Postuler (connecté et email vérifié)</h2>
+  <form id="apply">
+    <select id="apply-event"></select>
+    <div class="row"><input id="apply-debut" type="date" required><input id="apply-fin" type="date" required></div>
+    <button type="submit">Envoyer mes disponibilités</button>
+  </form>
+  <p id="apply-msg"></p>
+
+  <div id="verify-result" style="margin-top:12px;color:green"></div>
+</div>
+
+<script type="module">
+import { firebaseConfig } from './firebase-config.js';
+import { auth, db, savePendingRegistration, createCroupierFromPending, upsertPostulation, uploadEventImage } from './app.js';
+
+// Firebase auth libs
+import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, sendEmailVerification, checkActionCode, applyActionCode, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+import { getFirestore, collection, getDocs, query, where } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
+
+initializeApp(firebaseConfig);
+const myAuth = getAuth();
+const myDb = getFirestore();
+
+const signupForm = document.getElementById('signup');
+const signupMsg = document.getElementById('signup-msg');
+const loginForm = document.getElementById('login');
+const loginMsg = document.getElementById('login-msg');
+const eventsDiv = document.getElementById('events');
+const applyForm = document.getElementById('apply');
+const applyMsg = document.getElementById('apply-msg');
+const applyEventSel = document.getElementById('apply-event');
+const verifyResult = document.getElementById('verify-result');
+
+// load events list
+async function loadEvents() {
+  const snap = await getDocs(collection(myDb,'evenements'));
+  eventsDiv.innerHTML = '';
+  applyEventSel.innerHTML = '';
+  if (snap.empty) eventsDiv.textContent = 'Aucun événement';
+  for (const d of snap.docs) {
+    const e = d.data();
+    const card = document.createElement('div');
+    card.style.border = '1px solid #eee';
+    card.style.padding = '8px';
+    card.style.margin = '8px 0';
+    let html = `<strong>${e.nom}</strong> — ${e.debut} → ${e.fin}`;
+    if (e.imageUrl) html += `<div><img src="${e.imageUrl}" style="max-width:160px;margin-top:6px"></div>`;
+    card.innerHTML = html;
+    eventsDiv.appendChild(card);
+
+    const opt = document.createElement('option');
+    opt.value = d.id;
+    opt.textContent = `${e.nom} (${e.debut}→${e.fin})`;
+    opt.dataset.debut = e.debut;
+    opt.dataset.fin = e.fin;
+    applyEventSel.appendChild(opt);
+  }
+}
+await loadEvents();
+
+// signup -> create auth user, save pending registration and send verification link
+signupForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const nom = signupForm.nom.value.trim();
+  const prenom = signupForm.prenom.value.trim();
+  const email = signupForm.email.value.trim().toLowerCase();
+  const password = signupForm.password.value;
+  const livegame = signupForm.livegame.checked;
+
+  if (password.length < 6) { signupMsg.textContent = 'Mot de passe >= 6 caractères'; return; }
+
+  try {
+    // save pending registration
+    await savePendingRegistration({ nom, prenom, email, livegame });
+
+    // create auth user
+    const cred = await createUserWithEmailAndPassword(myAuth, email, password);
+    // send verification email; actionContinue = current page (works with localhost if added to authorized domains)
+    const actionCodeSettings = { url: window.location.href, handleCodeInApp: true };
+    await sendEmailVerification(cred.user, actionCodeSettings);
+    signupMsg.textContent = 'Email de vérification envoyé. Vérifiez votre boîte mail.';
+    signupForm.reset();
+  } catch (err) {
+    console.error(err);
+    signupMsg.textContent = 'Erreur inscription: ' + (err.message || err.code || '');
+  }
+});
+
+// Handle verification link (oobCode) when landing back on this page
+(async function handleVerifyLink() {
+  const params = new URLSearchParams(window.location.search);
+  const mode = params.get('mode');
+  const oobCode = params.get('oobCode');
+  if (mode === 'verifyEmail' && oobCode) {
+    try {
+      const info = await checkActionCode(myAuth, oobCode); // get info incl. email
+      const email = info?.data?.email;
+      await applyActionCode(myAuth, oobCode); // mark verified
+      // create croupier in Firestore from pending reg
+      const ok = await createCroupierFromPending(email);
+      verifyResult.textContent = ok ? 'Email vérifié — inscription finalisée ✅' : 'Email vérifié mais enregistrement introuvable.';
+      // try to sign out any temporary signed in user
+      try { await signOut(myAuth); } catch(e){}
+      // refresh events (croupier now in croupiers collection)
+      await loadEvents();
+    } catch (err) {
+      console.error(err);
+      verifyResult.textContent = 'Erreur lors de la vérification';
+    }
+  }
+})();
+
+// login form (croupier)
+loginForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const email = loginForm.email.value.trim().toLowerCase();
+  const password = loginForm.password.value;
+  try {
+    const cred = await signInWithEmailAndPassword(myAuth, email, password);
+    if (!cred.user.emailVerified) {
+      loginMsg.textContent = 'Email non vérifié. Vérifiez votre boîte mail.';
+      await signOut(myAuth);
+      return;
+    }
+    loginMsg.textContent = 'Connecté ✅';
+  } catch (err) {
+    console.error(err);
+    loginMsg.textContent = 'Erreur connexion: ' + (err.message || '');
+  }
+});
+
+// apply (postulation) - only for connected & verified users
+applyForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const debut = document.getElementById('apply-debut').value;
+  const fin = document.getElementById('apply-fin').value;
+  const eventId = applyEventSel.value;
+  const user = myAuth.currentUser;
+  if (!user || !user.emailVerified) {
+    applyMsg.textContent = 'Vous devez être connecté et avoir vérifié votre email.';
+    return;
+  }
+  const email = user.email.toLowerCase();
+  // date bounds check
+  const opt = applyEventSel.selectedOptions[0];
+  if (debut < opt.dataset.debut || fin > opt.dataset.fin) {
+    applyMsg.textContent = `Dates doivent être entre ${opt.dataset.debut} et ${opt.dataset.fin}`;
+    return;
+  }
+  try {
+    const res = await upsertPostulation(eventId, email, debut, fin);
+    applyMsg.textContent = res.created ? 'Disponibilité enregistrée ✅' : 'Disponibilité mise à jour ✅';
+  } catch (err) {
+    console.error(err);
+    applyMsg.textContent = 'Erreur lors de la postulation';
+  }
+});
+
+// keep auth state (optional UI highlights)
+onAuthStateChanged(myAuth, user => {
+  // if needed show/hide UI; kept simple for now
+});
+</script>
+</body>
+</html>
